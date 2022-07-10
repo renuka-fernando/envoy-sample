@@ -1,0 +1,144 @@
+admin:
+  address:
+    socket_address:
+      protocol: TCP
+      address: 0.0.0.0
+      port_value: 19000
+static_resources:
+  listeners:
+  - name: listener_0
+    address:
+      socket_address:
+        protocol: TCP
+        address: 0.0.0.0
+        port_value: 18080
+    filter_chains:
+    - filters:
+      - name: envoy.filters.network.http_connection_manager
+        typed_config:
+          "@type": type.googleapis.com/envoy.extensions.filters.network.http_connection_manager.v3.HttpConnectionManager
+          stat_prefix: ingress_http
+          access_log:
+          - name: envoy.access_loggers.stdout
+            typed_config:
+              "@type": type.googleapis.com/envoy.extensions.access_loggers.stream.v3.StdoutAccessLog
+              log_format: # default format https://www.envoyproxy.io/docs/envoy/latest/configuration/observability/access_log/usage
+                text_format: "[%START_TIME%] \"%REQ(:METHOD)% %REQ(X-ENVOY-ORIGINAL-PATH?:PATH)% %PROTOCOL%\" %RESPONSE_CODE% %RESPONSE_FLAGS% %BYTES_RECEIVED% %BYTES_SENT% %DURATION% %RESP(X-ENVOY-UPSTREAM-SERVICE-TIME)% \"%REQ(X-FORWARDED-FOR)%\" \"%REQ(USER-AGENT)%\" \"%REQ(X-REQUEST-ID)%\" \"%REQ(:AUTHORITY)%\" \"%UPSTREAM_HOST%\"\n"
+          local_reply_config:
+            mappers:
+            - filter:
+                status_code_filter:
+                  comparison:
+                    op: EQ
+                    value:
+                      default_value: 404
+                      runtime_key: key_b
+              headers_to_add:
+                - header:
+                    key: "foo"
+                    value: "bar"
+                  append: false
+              # status_code: 401
+              body:
+                inline_string: "not found"
+            body_format:
+              json_format:
+                status: "%RESPONSE_CODE%"
+                message: "%LOCAL_REPLY_BODY%"
+                path: "%REQ(:path)%"
+          route_config:
+            name: local_route
+            virtual_hosts:
+            - name: all_hosts
+              domains: ["*"]
+              routes:
+              - match:
+                  prefix: "/bar"
+                route:
+                  host_rewrite_literal: all-host.io
+                  cluster: echo_service
+            - name: local_host
+              domains: ["localhost", "localhost:*"]
+              routes:
+              - match:
+                  prefix: "/foo"
+                route:
+                  host_rewrite_literal: localhost.io
+                  cluster: echo_service
+              - match:
+                  prefix: "/lua"
+                route:
+                  host_rewrite_literal: localhost.lua.io
+                  cluster: echo_service
+                typed_per_filter_config:
+                  # Lua Per Route -------------------------------------------------------------------------
+                  envoy.filters.http.lua:
+                    "@type": type.googleapis.com/envoy.extensions.filters.http.lua.v3.LuaPerRoute
+                    source_code:
+                      inline_string:
+                        function envoy_on_response(response_handle)
+                          response_handle:headers():add("hello", "lua")
+                          response_handle:logInfo("Goodbye LUA.")
+                        end
+                  # Lua Per Route -------------------------------------------------------------------------
+          http_filters:
+          # EXT AUTH --------------------------------------------------------------------
+          - name: envoy.filters.http.ext_authz
+            typed_config:
+              "@type": type.googleapis.com/envoy.extensions.filters.http.ext_authz.v3.ExtAuthz
+              grpc_service:
+                envoy_grpc:
+                  cluster_name: ext_authz-grpc-service
+                timeout: 0.250s
+              transport_api_version: V3
+          # EXT AUTH --------------------------------------------------------------------
+          # Lua -------------------------------------------------------------------------
+          - name: envoy.filters.http.lua
+            typed_config:
+              "@type": type.googleapis.com/envoy.extensions.filters.http.lua.v3.Lua
+              inline_code: |
+                -- Called on the request path.
+                function envoy_on_request(request_handle)
+                  request_handle:logInfo("Hello.")
+                end
+                -- Called on the response path.
+                function envoy_on_response(response_handle)
+                  response_handle:headers():add("hello", "world")
+                  response_handle:logInfo("Goodbye.")
+                end
+          # Lua -------------------------------------------------------------------------
+          - name: envoy.filters.http.router
+  clusters:
+  # EXT AUTH --------------------------------------------------------------------
+  - name: ext_authz-grpc-service
+    type: STRICT_DNS
+    lb_policy: ROUND_ROBIN
+    typed_extension_protocol_options:
+      envoy.extensions.upstreams.http.v3.HttpProtocolOptions:
+        "@type": type.googleapis.com/envoy.extensions.upstreams.http.v3.HttpProtocolOptions
+        explicit_http_config:
+          http2_protocol_options: {}
+    load_assignment:
+      cluster_name: ext_authz-grpc-service
+      endpoints:
+      - lb_endpoints:
+        - endpoint:
+            address:
+              socket_address:
+                address: 127.0.0.1 # host.docker.internal
+                port_value: 9001
+  # EXT AUTH --------------------------------------------------------------------
+
+  - name: echo_service
+    type: LOGICAL_DNS
+    dns_lookup_family: V4_ONLY
+    lb_policy: ROUND_ROBIN
+    load_assignment:
+      cluster_name: echo_service
+      endpoints:
+      - lb_endpoints:
+        - endpoint:
+            address:
+              socket_address:
+                address: 127.0.0.1 # host.docker.internal
+                port_value: 8080
